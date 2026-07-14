@@ -782,6 +782,8 @@ struct rtw_sta_info {
 	bool vht_enable;
 	u8 init_ra_lv;
 	u64 ra_mask;
+	/* Last rate mask sent to the firmware, to gate no_update. */
+	u64 ra_mask_last;
 
 	DECLARE_BITMAP(tid_ba, IEEE80211_NUM_TIDS);
 
