@@ -831,6 +831,8 @@ struct rtw_vif {
 	u8 bssid[ETH_ALEN];
 	u8 port;
 	u8 bcn_ctrl;
+	/* Set once the firmware has been told the STA is connected. */
+	bool fw_media_connected;
 	struct list_head rsvd_page_list;
 	struct ieee80211_tx_queue_params tx_params[IEEE80211_NUM_ACS];
 	const struct rtw_vif_port *conf;
@@ -2060,6 +2062,20 @@ struct rtw_hw_scan_info {
 	u8 op_bw;
 };
 
+/*
+ * Synchronises the pre-auth wait on a beacon or probe response from the
+ * target BSSID before the join sequence continues.
+ */
+struct rtw_auth_sync {
+	wait_queue_head_t wait;
+	/* Protects the fields below. */
+	spinlock_t lock;
+	u8 bssid[ETH_ALEN];
+	bool active;
+	bool seen;
+	u32 seen_count;
+};
+
 struct rtw_dev {
 	struct ieee80211_hw *hw;
 	struct device *dev;
@@ -2133,8 +2149,12 @@ struct rtw_dev {
 	struct rtw_wow_param wow;
 
 	bool need_rfk;
+	/* Run the initial IQK once, not on every IPS leave. */
+	bool initial_rfk_done;
 	struct completion fw_scan_density;
 	bool ap_active;
+
+	struct rtw_auth_sync auth_sync;
 
 	bool led_registered;
 	char led_name[32];
