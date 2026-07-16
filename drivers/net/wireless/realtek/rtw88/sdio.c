@@ -29,6 +29,7 @@
  */
 #define RTW_SDIO_TX_FIFO_HIWATER			16
 #define RTW_SDIO_TX_FIFO_LOWATER			8
+#define RTW_SDIO_TX_RETRY_DELAY			msecs_to_jiffies(1)
 
 static bool rtw_sdio_is_bus_addr(u32 addr)
 {
@@ -1044,7 +1045,7 @@ static void rtw_sdio_tx_kick_off(struct rtw_dev *rtwdev)
 {
 	struct rtw_sdio *rtwsdio = (struct rtw_sdio *)rtwdev->priv;
 
-	queue_work(rtwsdio->txwq, &rtwsdio->tx_handler_data->work);
+	mod_delayed_work(rtwsdio->txwq, &rtwsdio->tx_handler_data->work, 0);
 }
 
 static void rtw_sdio_link_ps(struct rtw_dev *rtwdev, bool enter)
@@ -1581,7 +1582,8 @@ static int rtw_sdio_process_tx_queue(struct rtw_dev *rtwdev,
 static void rtw_sdio_tx_handler(struct work_struct *work)
 {
 	struct rtw_sdio_work_data *work_data =
-		container_of(work, struct rtw_sdio_work_data, work);
+		container_of(to_delayed_work(work), struct rtw_sdio_work_data,
+			     work);
 	struct rtw_sdio *rtwsdio;
 	struct rtw_dev *rtwdev;
 	bool processed;
@@ -1595,12 +1597,22 @@ static void rtw_sdio_tx_handler(struct work_struct *work)
 
 	for (queue = RTK_MAX_TX_QUEUE_NUM - 1; queue >= 0; queue--) {
 		for (limit = 0; limit < 1000; limit++) {
-			if (rtw_sdio_process_tx_queue(rtwdev, queue, &processed))
+			int ret;
+
+			ret = rtw_sdio_process_tx_queue(rtwdev, queue, &processed);
+			if (ret) {
+				if (rtw_is_8723bs(rtwdev) && ret == -EBUSY) {
+					mod_delayed_work(rtwsdio->txwq,
+							 &work_data->work,
+							 RTW_SDIO_TX_RETRY_DELAY);
+					return;
+				}
 				break;
+			}
 
 			if (rtw_is_8723bs(rtwdev) &&
 			    queue == RTW_TX_QUEUE_MGMT && processed) {
-				queue_work(rtwsdio->txwq, &work_data->work);
+				mod_delayed_work(rtwsdio->txwq, &work_data->work, 0);
 				return;
 			}
 
@@ -1638,7 +1650,7 @@ static int rtw_sdio_init_tx(struct rtw_dev *rtwdev)
 		goto err_destroy_wq;
 
 	rtwsdio->tx_handler_data->rtwdev = rtwdev;
-	INIT_WORK(&rtwsdio->tx_handler_data->work, rtw_sdio_tx_handler);
+	INIT_DELAYED_WORK(&rtwsdio->tx_handler_data->work, rtw_sdio_tx_handler);
 
 	return 0;
 
@@ -1652,6 +1664,7 @@ static void rtw_sdio_deinit_tx(struct rtw_dev *rtwdev)
 	struct rtw_sdio *rtwsdio = (struct rtw_sdio *)rtwdev->priv;
 	int i;
 
+	cancel_delayed_work_sync(&rtwsdio->tx_handler_data->work);
 	destroy_workqueue(rtwsdio->txwq);
 	kfree(rtwsdio->tx_handler_data);
 
