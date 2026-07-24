@@ -1469,7 +1469,8 @@ void rtw_add_rsvd_page_sta(struct rtw_dev *rtwdev,
 int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 				u8 *buf, u32 size)
 {
-	u8 bckp[3];
+	const bool is_8723bs_sdio = rtw_is_8723bs(rtwdev);
+	u8 bckp[4];
 	u8 val;
 	u16 rsvd_pg_head;
 	u32 bcn_valid_addr;
@@ -1499,11 +1500,28 @@ int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 	rtw_write8(rtwdev, REG_BCN_CTRL,
 		   (bckp[2] & ~BIT_EN_BCN_FUNCTION) | BIT_DIS_TSF_UDT);
 
-	if (rtw_hci_type(rtwdev) == RTW_HCI_TYPE_PCIE) {
+	/*
+	 * Clear BIT_EN_BCNQ_DL so the chip does not treat the reserved-page
+	 * upload as a real beacon; otherwise BIT_BCN_VALID never asserts. The
+	 * vendor rtl8723bs driver does this unconditionally; rtw88 only did it
+	 * for PCIe, which left 8723BS SDIO's BCN_VALID handshake failing.
+	 */
+	if (rtw_hci_type(rtwdev) == RTW_HCI_TYPE_PCIE || is_8723bs_sdio) {
 		val = rtw_read8(rtwdev, REG_FWHW_TXQ_CTRL + 2);
 		bckp[1] = val;
 		val &= ~(BIT_EN_BCNQ_DL >> 16);
 		rtw_write8(rtwdev, REG_FWHW_TXQ_CTRL + 2, val);
+	}
+
+	/*
+	 * 8723BS SDIO: point the SW beacon download path at port 0, else
+	 * BIT_BCN_VALID is never asserted after the SDIO upload completes.
+	 */
+	if (is_8723bs_sdio) {
+		val = rtw_read8(rtwdev, REG_DWBCN1_CTRL + 2);
+		bckp[3] = val;
+		val &= ~(BIT_DWBCN1_SW_BCN_SEL_PORT0 >> 16);
+		rtw_write8(rtwdev, REG_DWBCN1_CTRL + 2, val);
 	}
 
 	ret = rtw_hci_write_data_rsvd_page(rtwdev, buf, size);
@@ -1526,11 +1544,13 @@ int rtw_fw_write_data_rsvd_page(struct rtw_dev *rtwdev, u16 pg_addr,
 	}
 
 restore:
+	if (is_8723bs_sdio)
+		rtw_write8(rtwdev, REG_DWBCN1_CTRL + 2, bckp[3]);
 	rsvd_pg_head = rtwdev->fifo.rsvd_boundary;
 	rtw_write16(rtwdev, REG_FIFOPAGE_CTRL_2,
 		    rsvd_pg_head | BIT_BCN_VALID_V1);
 	rtw_write8(rtwdev, REG_BCN_CTRL, bckp[2]);
-	if (rtw_hci_type(rtwdev) == RTW_HCI_TYPE_PCIE)
+	if (rtw_hci_type(rtwdev) == RTW_HCI_TYPE_PCIE || is_8723bs_sdio)
 		rtw_write8(rtwdev, REG_FWHW_TXQ_CTRL + 2, bckp[1]);
 	rtw_write8(rtwdev, REG_CR + 1, bckp[0]);
 
