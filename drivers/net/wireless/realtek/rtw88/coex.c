@@ -1443,6 +1443,149 @@ static void rtw_coex_set_ant_path(struct rtw_dev *rtwdev, bool force, u8 phase)
 #define case_ALGO(src) \
 	case COEX_ALGO_##src: return #src
 
+/*
+ * 8723BS SDIO WiFi/BT coexistence antenna handling. On BT-disabled boards the
+ * scan/auth window still routes through the PTA mux; these helpers force the
+ * vendor-shaped WiFi-owned antenna path so directed management TX reaches air.
+ * All of them assume the caller has already established that this is an
+ * RTL8723BS with Bluetooth disabled.
+ */
+#define RTW8723BS_COEX_H_WLAN_ACTIVE	0x1800101b
+#define RTW8723BS_ANT_PATH_AUX		0x80
+#define RTW8723BS_ANT_PATH_MAIN		0x200
+
+static bool rtw_coex_8723bs_ant_is_aux(struct rtw_dev *rtwdev)
+{
+	return !!(rtwdev->efuse.bt_setting & BIT(6));
+}
+
+static u32 rtw_coex_8723bs_pta_ant_path(struct rtw_dev *rtwdev)
+{
+	return rtw_coex_8723bs_ant_is_aux(rtwdev) ? RTW8723BS_ANT_PATH_AUX :
+						    RTW8723BS_ANT_PATH_MAIN;
+}
+
+static void rtw_coex_8723bs_enable_bb(struct rtw_dev *rtwdev)
+{
+	u8 bb_en = BIT_FEN_BB_GLB_RST | BIT_FEN_BB_RSTB;
+
+	if ((rtw_read8(rtwdev, REG_SYS_FUNC_EN) & bb_en) == bb_en)
+		return;
+
+	rtw_write8_set(rtwdev, REG_SYS_FUNC_EN, bb_en);
+	usleep_range(10, 11);
+}
+
+static void rtw_coex_8723bs_write_bb_sel_btg(struct rtw_dev *rtwdev)
+{
+	u32 value = rtw_coex_8723bs_pta_ant_path(rtwdev);
+
+	rtw_coex_8723bs_enable_bb(rtwdev);
+
+	rtw_write32(rtwdev, REG_BB_SEL_BTG_8723B, value);
+	if (rtw_read32(rtwdev, REG_BB_SEL_BTG_8723B) == value)
+		return;
+
+	/* The BB clock may have been gated; reset it and write again. */
+	usleep_range(10, 11);
+	rtw_write8_set(rtwdev, REG_SYS_FUNC_EN,
+		       BIT_FEN_BB_GLB_RST | BIT_FEN_BB_RSTB);
+	rtw_write32(rtwdev, REG_BB_SEL_BTG_8723B, value);
+}
+
+static void rtw_coex_8723bs_set_cck_pri(struct rtw_dev *rtwdev)
+{
+	rtw_write32(rtwdev, REG_BT_COEX_TABLE_H, RTW8723BS_COEX_H_WLAN_ACTIVE);
+}
+
+static void rtw_coex_8723bs_own_pad_ctrl(struct rtw_dev *rtwdev)
+{
+	u32 before, after;
+
+	before = rtw_read32(rtwdev, REG_PAD_CTRL1);
+	after = before & ~(BIT_LNAON_WLBT_SEL | BIT_SW_DPDT_SEL_DATA);
+	after |= BIT_PAPE_WLBT_SEL;
+	if (after != before)
+		rtw_write32(rtwdev, REG_PAD_CTRL1, after);
+}
+
+static void rtw_coex_8723bs_fw_gnt_bt_low(struct rtw_dev *rtwdev)
+{
+	if (rtw_read8(rtwdev, REG_GNT_BT) == 0x00 &&
+	    rtw_read8(rtwdev, REG_BT_COEX_ENH_INTR_CTRL) == 0x0c)
+		return;
+
+	rtw_fw_set_gnt_bt(rtwdev, 0);
+}
+
+static void rtw_coex_8723bs_reassert_ant_buffer(struct rtw_dev *rtwdev)
+{
+	rtw_coex_8723bs_enable_bb(rtwdev);
+
+	rtw_write8_set(rtwdev, REG_PWR_DATA + 1,
+		       BIT_EEPRPAD_RFE_CTRL_EN >> 8);
+	rtw_write8(rtwdev, REG_RFE_CTRL_E, 0xff);
+	rtw_write8_mask(rtwdev, REG_RFE_CTRL_ANT_SW, BIT_RFE_CTRL_ANT_SW_SEL,
+			0x3);
+	rtw_write8(rtwdev, REG_RFE_CTRL_ANTA_SRC, 0x77);
+}
+
+static void rtw_coex_8723bs_apply_scan_table(struct rtw_dev *rtwdev)
+{
+	rtwdev->coex.dm.cur_table = 2;
+	rtw_coex_set_table(rtwdev, true, 0x5a5a5a5a, 0x5a5a5a5a);
+}
+
+/*
+ * Non-connected scan/auth workaround: PS-TDMA type 8 off, PTA antenna path,
+ * coex table type 2 (matches the vendor non-connected arbitration).
+ */
+static void rtw_coex_8723bs_scan_workaround(struct rtw_dev *rtwdev)
+{
+	struct rtw_coex_dm *coex_dm = &rtwdev->coex.dm;
+
+	coex_dm->cur_ps_tdma_on = false;
+	coex_dm->cur_ps_tdma = 8;
+	coex_dm->ps_tdma_para[0] = 0x08;
+	coex_dm->ps_tdma_para[1] = 0x00;
+	coex_dm->ps_tdma_para[2] = 0x00;
+	coex_dm->ps_tdma_para[3] = 0x00;
+	coex_dm->ps_tdma_para[4] = 0x00;
+
+	rtw_fw_coex_tdma_type(rtwdev, 0x08, 0x00, 0x00, 0x00, 0x00);
+	rtw_coex_8723bs_fw_gnt_bt_low(rtwdev);
+	rtw_coex_set_ant_path(rtwdev, true, COEX_SET_ANT_2G);
+	rtw_coex_8723bs_reassert_ant_buffer(rtwdev);
+	rtw_coex_8723bs_apply_scan_table(rtwdev);
+	rtw_coex_8723bs_set_cck_pri(rtwdev);
+	rtw_coex_8723bs_write_bb_sel_btg(rtwdev);
+	rtw_coex_8723bs_own_pad_ctrl(rtwdev);
+}
+
+/*
+ * The vendor driver keeps its own scan-time antenna state and does not run
+ * the generic coexistence algorithm on boards where BT is disabled. Return
+ * true once the notification has been fully handled for this chip.
+ */
+static bool rtw_coex_8723bs_scan_notify(struct rtw_dev *rtwdev, u8 type)
+{
+	struct rtw_coex_stat *coex_stat = &rtwdev->coex.stat;
+
+	if (!rtw_is_8723bs(rtwdev) || !coex_stat->bt_disabled)
+		return false;
+
+	if (type != COEX_SCAN_START_2G && type != COEX_SCAN_START) {
+		coex_stat->wl_hi_pri_task2 = false;
+		return true;
+	}
+
+	coex_stat->cnt_wl[COEX_CNT_WL_SCANAP] = 0;
+	coex_stat->wl_hi_pri_task2 = true;
+	rtw_coex_8723bs_scan_workaround(rtwdev);
+
+	return true;
+}
+
 static const char *rtw_coex_get_algo_string(u8 algo)
 {
 	switch (algo) {
@@ -2770,7 +2913,7 @@ void rtw_coex_power_on_setting(struct rtw_dev *rtwdev)
 	coex->stop_dm = true;
 	coex->wl_rf_off = false;
 
-	/* enable BB, we can write 0x948 */
+	/* enable BB, so BB_SEL_BTG is writable */
 	rtw_write8_set(rtwdev, REG_SYS_FUNC_EN,
 		       BIT_FEN_BB_GLB_RST | BIT_FEN_BB_RSTB);
 
@@ -2876,6 +3019,9 @@ void rtw_coex_scan_notify(struct rtw_dev *rtwdev, u8 type)
 
 	coex->freeze = false;
 	rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF, true);
+
+	if (rtw_coex_8723bs_scan_notify(rtwdev, type))
+		return;
 
 	if (type == COEX_SCAN_START_5G) {
 		rtw_dbg(rtwdev, RTW_DBG_COEX,
