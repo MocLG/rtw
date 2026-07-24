@@ -838,6 +838,8 @@ struct rtw_vif {
 	struct rtw_traffic_stats stats;
 
 	struct rtw_bfee bfee;
+
+	bool fw_media_connected;
 };
 
 struct rtw_regulatory {
