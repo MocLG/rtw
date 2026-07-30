@@ -829,6 +829,8 @@ struct rtw_vif {
 	u8 bssid[ETH_ALEN];
 	u8 port;
 	u8 bcn_ctrl;
+	bool pre_auth_h2c_sent;
+	bool pre_auth_join_done;
 	struct list_head rsvd_page_list;
 	struct ieee80211_tx_queue_params tx_params[IEEE80211_NUM_ACS];
 	const struct rtw_vif_port *conf;
@@ -888,6 +890,8 @@ struct rtw_chip_ops {
 	void (*set_ampdu_factor)(struct rtw_dev *rtwdev, u8 factor);
 	void (*false_alarm_statistics)(struct rtw_dev *rtwdev);
 	void (*phy_calibration)(struct rtw_dev *rtwdev);
+	void (*prepare_tx)(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
+			   struct ieee80211_prep_tx_info *info);
 	void (*dpk_track)(struct rtw_dev *rtwdev);
 	void (*cck_pd_set)(struct rtw_dev *rtwdev, u8 level);
 	void (*pwr_track)(struct rtw_dev *rtwdev);
@@ -2250,7 +2254,10 @@ void rtw_restore_reg(struct rtw_dev *rtwdev,
 		     struct rtw_backup_info *bckp, u32 num);
 void rtw_desc_to_mcsrate(u16 rate, u8 *mcs, u8 *nss);
 void rtw_set_channel(struct rtw_dev *rtwdev);
-void rtw_chip_prepare_tx(struct rtw_dev *rtwdev);
+void rtw_chip_prepare_tx(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
+			 struct ieee80211_prep_tx_info *info);
+void rtw8723bs_prepare_tx(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
+			  struct ieee80211_prep_tx_info *info);
 void rtw_vif_port_config(struct rtw_dev *rtwdev, struct rtw_vif *rtwvif,
 			 u32 config);
 void rtw_tx_report_purge_timer(struct timer_list *t);
