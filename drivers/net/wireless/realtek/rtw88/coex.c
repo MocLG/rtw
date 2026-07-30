@@ -1518,6 +1518,16 @@ static void rtw_coex_8723bs_fw_gnt_bt_low(struct rtw_dev *rtwdev)
 	rtw_fw_set_gnt_bt(rtwdev, 0);
 }
 
+static void rtw_coex_8723bs_force_assoc_pta_ant(struct rtw_dev *rtwdev)
+{
+	rtw_coex_8723bs_fw_gnt_bt_low(rtwdev);
+	rtw_coex_set_ant_switch(rtwdev, COEX_SWITCH_CTRL_BY_PTA,
+				COEX_SWITCH_TO_NOCARE);
+	rtw_coex_8723bs_set_cck_pri(rtwdev);
+	rtw_coex_8723bs_write_bb_sel_btg(rtwdev);
+	rtw_coex_8723bs_own_pad_ctrl(rtwdev);
+}
+
 static void rtw_coex_8723bs_reassert_ant_buffer(struct rtw_dev *rtwdev)
 {
 	rtw_coex_8723bs_enable_bb(rtwdev);
@@ -1584,6 +1594,41 @@ static bool rtw_coex_8723bs_scan_notify(struct rtw_dev *rtwdev, u8 type)
 	rtw_coex_8723bs_scan_workaround(rtwdev);
 
 	return true;
+}
+
+/*
+ * The vendor ConnectNotify() early-returns without sending H2Cs on
+ * BT-disabled boards; the scan workaround has already established the PTA
+ * path, the coex table and PS-TDMA. Keep only the register level PTA
+ * reassertion at associate-start. Return true once the notification has
+ * been fully handled for this chip.
+ */
+static bool rtw_coex_8723bs_connect_notify(struct rtw_dev *rtwdev, u8 type)
+{
+	if (!rtw_is_8723bs(rtwdev) || !rtwdev->coex.stat.bt_disabled)
+		return false;
+
+	if (type == COEX_ASSOCIATE_START)
+		rtw_coex_8723bs_force_assoc_pta_ant(rtwdev);
+
+	return true;
+}
+
+/*
+ * Replayed immediately before start_clnt_join()/auth: PS-TDMA type 8 then
+ * the forced WiFi PTA antenna path, so the auth window is clean. The caller
+ * has already established that this is an RTL8723BS.
+ */
+void rtw_coex_8723bs_pre_auth_h2c(struct rtw_dev *rtwdev)
+{
+	lockdep_assert_held(&rtwdev->mutex);
+
+	if (!rtwdev->coex.stat.bt_disabled)
+		return;
+
+	rtw_fw_coex_tdma_type(rtwdev, 0x08, 0x00, 0x00, 0x00, 0x00);
+	rtw_coex_8723bs_fw_gnt_bt_low(rtwdev);
+	rtw_coex_8723bs_force_assoc_pta_ant(rtwdev);
 }
 
 static const char *rtw_coex_get_algo_string(u8 algo)
@@ -3082,6 +3127,9 @@ void rtw_coex_connect_notify(struct rtw_dev *rtwdev, u8 type)
 	struct rtw_coex_stat *coex_stat = &coex->stat;
 
 	if (coex->manual_control || coex->stop_dm)
+		return;
+
+	if (rtw_coex_8723bs_connect_notify(rtwdev, type))
 		return;
 
 	rtw_coex_write_scbd(rtwdev, COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF, true);
