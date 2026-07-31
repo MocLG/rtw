@@ -912,15 +912,9 @@ void rtw_set_channel(struct rtw_dev *rtwdev)
 		rtwdev->need_rfk = true;
 }
 
-void rtw_chip_prepare_tx(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
-			 struct ieee80211_prep_tx_info *info)
+void rtw_chip_prepare_tx(struct rtw_dev *rtwdev)
 {
 	const struct rtw_chip_info *chip = rtwdev->chip;
-
-	if (chip->ops->prepare_tx) {
-		chip->ops->prepare_tx(rtwdev, vif, info);
-		return;
-	}
 
 	if (rtwdev->need_rfk) {
 		rtwdev->need_rfk = false;

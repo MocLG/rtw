@@ -2953,7 +2953,6 @@ static const struct rtw_chip_ops rtw8723b_ops = {
 	.set_ampdu_factor	= NULL,
 	.false_alarm_statistics	= rtw8723x_false_alarm_statistics,
 	.phy_calibration	= rtw8723b_phy_calibration,
-	.prepare_tx		= rtw8723bs_prepare_tx,
 	.dpk_track		= NULL,
 	/*
 	 * REG_CSRATIO does not exist on this chip generation, so there is
