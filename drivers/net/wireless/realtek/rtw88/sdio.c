@@ -877,11 +877,7 @@ static void rtw_sdio_init(struct rtw_dev *rtwdev)
 {
 	struct rtw_sdio *rtwsdio = (struct rtw_sdio *)rtwdev->priv;
 
-	if (rtw_is_8723bs(rtwdev))
-		rtwsdio->irq_mask = REG_SDIO_HIMR_RX_REQUEST;
-	else
-		rtwsdio->irq_mask = REG_SDIO_HIMR_RX_REQUEST |
-				    REG_SDIO_HIMR_CPWM1;
+	rtwsdio->irq_mask = REG_SDIO_HIMR_RX_REQUEST | REG_SDIO_HIMR_CPWM1;
 }
 
 static void rtw_sdio_enable_rx_aggregation(struct rtw_dev *rtwdev)
@@ -889,7 +885,6 @@ static void rtw_sdio_enable_rx_aggregation(struct rtw_dev *rtwdev)
 	u8 size, timeout;
 
 	switch (rtwdev->chip->id) {
-	case RTW_CHIP_TYPE_8723B:
 	case RTW_CHIP_TYPE_8703B:
 	case RTW_CHIP_TYPE_8821A:
 	case RTW_CHIP_TYPE_8812A:
@@ -917,8 +912,6 @@ static void rtw_sdio_enable_rx_aggregation(struct rtw_dev *rtwdev)
 		    FIELD_PREP(BIT_DMA_AGG_TO_V1, timeout));
 
 	rtw_write8_set(rtwdev, REG_RXDMA_MODE, BIT_DMA_MODE);
-	if (rtw_is_8723bs(rtwdev))
-		rtw_write8_mask(rtwdev, REG_RXDMA_MODE, BIT_DMA_BURST_CNT, 0x3);
 }
 
 static void rtw_sdio_enable_interrupt(struct rtw_dev *rtwdev)
@@ -984,22 +977,12 @@ static void rtw_sdio_8723bs_check_rqpn(struct rtw_dev *rtwdev)
 
 static int rtw_sdio_start(struct rtw_dev *rtwdev)
 {
-	u32 clear;
-
 	if (rtw_is_8723bs(rtwdev)) {
 		rtw_sdio_8723bs_check_rqpn(rtwdev);
 		rtw_sdio_8723bs_init_free_txpg(rtwdev);
 	}
 
 	rtw_sdio_enable_rx_aggregation(rtwdev);
-
-	if (rtw_is_8723bs(rtwdev)) {
-		clear = rtw_read32(rtwdev, REG_SDIO_HISR) &
-			RTW_SDIO_HISR_CLEAR_MASK;
-		if (clear)
-			rtw_write32(rtwdev, REG_SDIO_HISR, clear);
-	}
-
 	rtw_sdio_enable_interrupt(rtwdev);
 
 	return 0;
@@ -1083,8 +1066,6 @@ static void rtw_sdio_interface_cfg(struct rtw_dev *rtwdev)
 
 	val = rtw_read32(rtwdev, REG_SDIO_TX_CTRL);
 	val &= 0xfff8;
-	if (rtw_is_8723bs(rtwdev))
-		val |= BIT_SDIO_TX_CTRL_ALWAYS_RECOGNIZE;
 	rtw_write32(rtwdev, REG_SDIO_TX_CTRL, val);
 }
 
@@ -1361,14 +1342,6 @@ static void rtw_sdio_handle_interrupt(struct sdio_func *sdio_func)
 		hisr &= ~REG_SDIO_HISR_RX_REQUEST;
 		rtw_sdio_rx_isr(rtwdev);
 	}
-
-	/*
-	 * RTL8723BS keeps raising the interrupt after resume if undefined
-	 * status bits are written back, so acknowledge only the bits that are
-	 * both defined and unmasked. Other chips keep the existing behaviour.
-	 */
-	if (rtw_is_8723bs(rtwdev))
-		hisr &= rtwsdio->irq_mask & RTW_SDIO_HISR_CLEAR_MASK;
 
 	rtw_write32(rtwdev, REG_SDIO_HISR, hisr);
 
