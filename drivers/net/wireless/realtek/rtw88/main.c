@@ -299,6 +299,18 @@ static void rtw_watch_dog_work(struct work_struct *work)
 	 * get that vif and check if device is having traffic more than the
 	 * threshold.
 	 */
+	/*
+	 * The RTL8723BS firmware costs enough per packet latency coming out of
+	 * LPS to throttle bursty traffic badly, and the check above enters LPS
+	 * after a single quiet two second window, which an ordinary session
+	 * hits constantly. Gate it on the smoothed throughput instead, so the
+	 * chip only sleeps after sustained idle and stays awake through an
+	 * active session. Other chips keep the existing behaviour.
+	 */
+	if (rtw_is_8723bs(rtwdev) &&
+	    (stats->tx_throughput || stats->rx_throughput))
+		ps_active = true;
+
 	if (rtwdev->ps_enabled && data.rtwvif && !ps_active &&
 	    !rtwdev->beacon_loss && !rtwdev->ap_active)
 		rtw_enter_lps(rtwdev, data.rtwvif->port);
