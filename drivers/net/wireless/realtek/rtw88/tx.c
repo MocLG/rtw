@@ -176,37 +176,146 @@ static void rtw_tx_report_enable(struct rtw_dev *rtwdev,
 	pkt_info->report = true;
 }
 
+/*
+ * DEBUG BRANCH, NOT FOR UPSTREAM.
+ *
+ * Instrumentation for the "failed to get tx report from firmware" warning and
+ * the reconnection that follows it on RTL8723BS in a poor signal environment.
+ *
+ * txrpt_report_on_timeout=1 makes the timeout hand the frames back to mac80211
+ * as unacknowledged instead of dropping them silently. mac80211 disconnects
+ * immediately when a nullfunc it is using to poll the link gets no tx status at
+ * all, but retries when the status says the frame was not acked, so if the
+ * purge is what ends the connection this should stop the reconnections while
+ * leaving the warning in place.
+ */
+static bool txrpt_report_on_timeout;
+module_param(txrpt_report_on_timeout, bool, 0644);
+MODULE_PARM_DESC(txrpt_report_on_timeout,
+		 "report timed out tx frames to mac80211 as unacked instead of dropping them");
+
+static bool txrpt_verbose = true;
+module_param(txrpt_verbose, bool, 0644);
+MODULE_PARM_DESC(txrpt_verbose,
+		 "log every nullfunc and management frame through the tx report path");
+
+/* stashed in status_driver_data, which is 16 bytes; sn must stay at offset 0 */
+struct rtw_txrpt_dbg {
+	u8 sn;
+	u8 kind;
+	__le16 fc;
+	u32 jf;
+};
+
+static_assert(sizeof(struct rtw_txrpt_dbg) <= 16);
+
+#define RTW_TXRPT_DATA		0
+#define RTW_TXRPT_MGMT		1
+#define RTW_TXRPT_NULLFUNC	2
+
+static void rtw_tx_report_tx_status(struct rtw_dev *rtwdev,
+				    struct sk_buff *skb, bool acked);
+
+static struct rtw_txrpt_dbg *rtw_txrpt_dbg(struct sk_buff *skb)
+{
+	return (struct rtw_txrpt_dbg *)
+		IEEE80211_SKB_CB(skb)->status.status_driver_data;
+}
+
+static const char *rtw_txrpt_kind(u8 kind)
+{
+	switch (kind) {
+	case RTW_TXRPT_NULLFUNC:	return "nullfunc";
+	case RTW_TXRPT_MGMT:		return "mgmt";
+	default:			return "data";
+	}
+}
+
 void rtw_tx_report_purge_timer(struct timer_list *t)
 {
 	struct rtw_dev *rtwdev = timer_container_of(rtwdev, t,
 						    tx_report.purge_timer);
 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+	struct sk_buff_head stuck;
+	struct rtw_txrpt_dbg *d;
+	struct sk_buff *skb;
 	unsigned long flags;
+	unsigned int n = 0;
 
 	if (skb_queue_len(&tx_report->queue) == 0)
 		return;
 
 	rtw_warn(rtwdev, "failed to get tx report from firmware\n");
 
+	/*
+	 * Take the whole queue out under the lock, then log and dispose of it
+	 * outside, so the printks cannot perturb the timing being measured.
+	 */
+	__skb_queue_head_init(&stuck);
 	spin_lock_irqsave(&tx_report->q_lock, flags);
-	skb_queue_purge(&tx_report->queue);
+	skb_queue_splice_init(&tx_report->queue, &stuck);
 	spin_unlock_irqrestore(&tx_report->q_lock, flags);
+
+	rtw_warn(rtwdev, "txrpt: %u frame(s) timed out, %s\n",
+		 skb_queue_len(&stuck),
+		 txrpt_report_on_timeout ? "reporting them as not acked"
+					 : "dropping them silently");
+
+	while ((skb = __skb_dequeue(&stuck))) {
+		d = rtw_txrpt_dbg(skb);
+		rtw_warn(rtwdev,
+			 "txrpt:   [%u] sn=%02x %s fc=%04x waited=%ums\n",
+			 n++, d->sn, rtw_txrpt_kind(d->kind),
+			 le16_to_cpu(d->fc),
+			 jiffies_to_msecs(jiffies - d->jf));
+
+		if (txrpt_report_on_timeout)
+			rtw_tx_report_tx_status(rtwdev, skb, false);
+		else
+			dev_kfree_skb_any(skb);
+	}
 }
 
 void rtw_tx_report_enqueue(struct rtw_dev *rtwdev, struct sk_buff *skb, u8 sn)
 {
 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
 	unsigned long timeout = RTW_TX_PROBE_TIMEOUT;
+	struct rtw_txrpt_dbg *d;
+	struct ieee80211_hdr *hdr;
 	unsigned long flags;
+	unsigned int qlen;
+	__le16 fc;
 	u8 *drv_data;
+	u8 kind;
 
 	/* pass sn to tx report handler through driver data */
 	drv_data = (u8 *)IEEE80211_SKB_CB(skb)->status.status_driver_data;
 	*drv_data = sn;
 
+	/* DEBUG: record what this frame is and when it was queued */
+	hdr = (struct ieee80211_hdr *)skb->data;
+	fc = hdr->frame_control;
+	if (ieee80211_is_any_nullfunc(fc))
+		kind = RTW_TXRPT_NULLFUNC;
+	else if (ieee80211_is_mgmt(fc))
+		kind = RTW_TXRPT_MGMT;
+	else
+		kind = RTW_TXRPT_DATA;
+
+	d = rtw_txrpt_dbg(skb);
+	d->sn = sn;
+	d->kind = kind;
+	d->fc = fc;
+	d->jf = jiffies;
+
 	spin_lock_irqsave(&tx_report->q_lock, flags);
 	__skb_queue_tail(&tx_report->queue, skb);
+	qlen = skb_queue_len(&tx_report->queue);
 	spin_unlock_irqrestore(&tx_report->q_lock, flags);
+
+	if (txrpt_verbose && kind != RTW_TXRPT_DATA)
+		rtw_info(rtwdev, "txrpt: %s sn=%02x queued, %u outstanding\n",
+			 rtw_txrpt_kind(kind), sn, qlen);
 
 	if ((rtwdev->chip->id == RTW_CHIP_TYPE_8723D &&
 	     rtwdev->hci.type == RTW_HCI_TYPE_USB) ||
@@ -235,8 +344,10 @@ static void rtw_tx_report_tx_status(struct rtw_dev *rtwdev,
 void rtw_tx_report_handle(struct rtw_dev *rtwdev, struct sk_buff *skb, int src)
 {
 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+	struct sk_buff *cur, *tmp, *match = NULL;
+	unsigned int skipped = 0, qlen, age;
+	struct rtw_txrpt_dbg *d;
 	struct rtw_c2h_cmd *c2h;
-	struct sk_buff *cur, *tmp;
 	unsigned long flags;
 	u8 sn, st;
 	u8 *n;
@@ -256,11 +367,42 @@ void rtw_tx_report_handle(struct rtw_dev *rtwdev, struct sk_buff *skb, int src)
 		n = (u8 *)IEEE80211_SKB_CB(cur)->status.status_driver_data;
 		if (*n == sn) {
 			__skb_unlink(cur, &tx_report->queue);
-			rtw_tx_report_tx_status(rtwdev, cur, st == 0);
+			match = cur;
 			break;
 		}
+		skipped++;
 	}
+	qlen = skb_queue_len(&tx_report->queue);
 	spin_unlock_irqrestore(&tx_report->q_lock, flags);
+
+	/* DEBUG: a report that matches nothing means its frame is already gone */
+	if (!match) {
+		rtw_warn(rtwdev,
+			 "txrpt: report sn=%02x st=%u matched nothing, %u outstanding\n",
+			 sn, st, qlen);
+		return;
+	}
+
+	d = rtw_txrpt_dbg(match);
+	age = jiffies_to_msecs(jiffies - d->jf);
+
+	/*
+	 * sn is six bits, so it repeats every 64 reported frames. If a report
+	 * matches an entry that has been waiting far longer than a frame ever
+	 * takes, the queue is almost certainly aliasing: this report belongs to
+	 * a newer frame, the stale entry is being retired in its place, and the
+	 * newer frame is left in the queue to do the same again.
+	 */
+	if (age > 1000)
+		rtw_warn(rtwdev,
+			 "txrpt: report sn=%02x matched a %ums old %s frame, %u skipped, %u still outstanding, possible sn wrap\n",
+			 sn, age, rtw_txrpt_kind(d->kind), skipped, qlen);
+	else if (txrpt_verbose && d->kind != RTW_TXRPT_DATA)
+		rtw_info(rtwdev, "txrpt: %s sn=%02x %s after %ums\n",
+			 rtw_txrpt_kind(d->kind), sn,
+			 st == 0 ? "acked" : "NOT acked", age);
+
+	rtw_tx_report_tx_status(rtwdev, match, st == 0);
 }
 
 static u8 rtw_get_mgmt_rate(struct rtw_dev *rtwdev, struct sk_buff *skb,
