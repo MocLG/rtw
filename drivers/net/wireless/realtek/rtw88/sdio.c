@@ -647,6 +647,16 @@ static int rtw_sdio_write_port(struct rtw_dev *rtwdev, struct sk_buff *skb,
 
 	txsize = sdio_align_size(rtwsdio->sdio_func, skb->len);
 
+	if (txsize > skb->len) {
+		/*
+		 * __skb_pad() must not free the skb on failure: both callers
+		 * still own it, one requeues it and the other frees it.
+		 */
+		ret = __skb_pad(skb, txsize - skb->len, false);
+		if (ret)
+			return ret;
+	}
+
 	ret = rtw_sdio_check_free_txpg(rtwdev, queue, txsize);
 	if (ret)
 		return ret;
