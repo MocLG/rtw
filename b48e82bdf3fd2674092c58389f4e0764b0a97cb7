@@ -1,0 +1,77 @@
+Changes in v9:
+  - rtw_sdio_write_port() is now only a dispatcher, with the two paths in
+    rtw_sdio_write_port_8723bs() and rtw_sdio_write_port_generic(), as
+    you asked. The chip specific one takes the mutex with guard()
+    directly, so the extra rtw_sdio_8723bs_write_port() layer, which only
+    existed to give the guard a scope while the generic path shared the
+    outer function, is gone.
+  - the unaligned SKB warning is in rtw_sdio_write_to_port() now, once,
+    next to the transfer whose pointer it checks and after any padding.
+    __func__ therefore reads rtw_sdio_write_to_port on every SDIO part.
+Changes in v8:
+  - RTW_TX_QUEUE_VO is accounted against the normal page pool rather than
+    the high one. rtw_sdio_get_tx_addr() writes it to the normal transmit
+    FIFO, and that is the pool the chip charges: over a saturating VO
+    flood the high pool never lost a single page while the public pool
+    drained. The vendor maps VO to the high queue, but it also writes VO
+    to the high FIFO, which rtw88 does not.
+  - the output queue entry claimed before the transfer is handed back
+    when the transfer fails, rather than staying claimed until the cache
+    next resyncs from the chip.
+  - mutex_destroy() for tx_credit_lock on teardown and on the init error
+    path, matching rtw_core_deinit().
+  - the comment on the cached page counters no longer explains the
+    atomic_t by the several contexts that write them. Since v7 the
+    transmit paths all update them under tx_credit_lock; what is left
+    outside the lock is rtw_sdio_start() seeding them, and that is the
+    reason they stay atomic_t.
+  - the free page check, the output queue wait, the transfer and the
+    accounting moved into rtw_sdio_8723bs_write_port(), which takes the
+    lock with guard(mutex) as you suggested. The generic path is a short
+    branch in rtw_sdio_write_port() that never touches the lock, and the
+    transfer itself is shared as rtw_sdio_write_to_port().
+  - lockdep_assert_held() added to rtw_sdio_8723bs_write_port(),
+    rtw_sdio_8723bs_wait_tx_oqt() and rtw_sdio_8723bs_consume_txpg(),
+    and checked on a kernel built with CONFIG_PROVE_LOCKING over
+    bidirectional traffic and three module reloads: nothing fired.
+  - the padding uses a pad_size local and the comment is down to the one
+    point that matters, that __skb_pad() must not free the skb.
+  - the comment above the lock is gone; the one at the declaration of
+    tx_credit_lock covers it.
+Changes in v7:
+  - the free page check, the output queue wait and the accounting after
+    the transfer are serialised by a mutex. The TX worker and the H2C
+    path run concurrently, and two writers that both passed the checks
+    could claim the same pages and output queue entry; the OQT refill
+    could also read the register while the other writer was between its
+    claim and its transfer. The chip silently discards the overcommitted
+    transfer, which for H2C means a lost firmware command.
+  - the CMD53 address is computed from skb->len again, as upstream does.
+    Passing the aligned size changed the encoded transfer length for
+    every other SDIO chip whenever sdio_align_size() padded; for the
+    RTL8723BS the two encodings are the same value.
+  - the padding is applied with __skb_pad() and only on the RTL8723BS
+    path. The open coded version wrote into a cloned skb's shared buffer
+    when the tailroom happened to be large enough, and it also ran on
+    the generic path, giving other chips a new allocation and failure
+    mode. __skb_pad() does not move skb->len, so the trim on the way out
+    is gone too. It must not free the skb on failure, since one caller
+    requeues it and the other frees it.
+
+Changes in v6: none.
+Changes in v5:
+  - the commit message now says what OQT is, as far as the vendor driver
+    reveals it.
+  - rtw_sdio_8723bs_sync_free_txpg() returns whether the chip reported
+    anything and is the only caller of _store_free_txpg(), and
+    _init_free_txpg() returns an error rather than nothing. That found a
+    real bug: the public pool size was acq_pg_num minus the reserved
+    queues with no check, so a chip coming up with no transmit page
+    allocation would underflow a u16 and leave about 65000 free pages.
+    It is now rtw_sdio_8723bs_pubq_num(), shared with the queue page
+    allocation repair path, and it fails cleanly.
+  - the output queue wait is bounded by a jiffies deadline rather than a
+    loop count, so RTW_SDIO_OQT_TIMEOUT_MS is really milliseconds.
+  - rtw_sdio_8723bs_check_rqpn() returns an error instead of silently
+    doing nothing when the pool cannot cover the reserved queues, and
+    rtw_sdio_start() propagates it. Both early returns are explained.
