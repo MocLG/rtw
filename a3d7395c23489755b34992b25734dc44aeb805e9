@@ -1,0 +1,11 @@
+Changes in v9: none.
+Changes in v8: none.
+Changes in v7: none.
+Changes in v6: none.
+Changes in v5: fixed the interrupt acknowledgment. It masked the status
+word with both irq_mask and RTW_SDIO_HISR_CLEAR_MASK, but for this chip
+irq_mask is REG_SDIO_HIMR_RX_REQUEST alone and that bit is not in the
+clear mask, so the two had no bits in common and the driver acknowledged
+nothing at all. It now masks with the defined bits only, which is what
+the comment described. The commit message also no longer presents the
+resume behaviour as re-measured, because it is not.
