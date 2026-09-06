@@ -1,0 +1,47 @@
+Changes in v9: none, beyond recording your Acked-by.
+Changes in v8:
+  - the stop and the wake take the TX queue lock with
+    guard(spinlock_irqsave) across the length check and the flag update,
+    following pci.c, which holds irq_lock on both sides and needs no
+    barrier because of it. The smp_mb() pair, the READ_ONCE and
+    WRITE_ONCE accessors and the re-check that undid a stop all went
+    with it.
+  - q_map is read later, just before the call that uses it. It cannot move
+    past rtw_sdio_indicate_tx_status(), which consumes the skb, so that is
+    as far down as it goes.
+Changes in v7:
+  - the mac80211 queue index is read before skb_queue_tail() publishes
+    the skb to the TX worker, which may process and free it immediately;
+    reading it afterwards was a use after free.
+  - the stop path re-checks the FIFO after setting the stopped flag and
+    undoes the stop if the worker drained it meanwhile. In that window
+    the drain side still saw the flag clear, so neither side would have
+    woken the queue and the AC stayed stopped for good. The flag is
+    accessed with READ_ONCE/WRITE_ONCE and the re-check is ordered
+    against the drain path with a barrier pair.
+
+Changes in v6:
+  - dropped rtw_sdio_reschedule_tx_work(). It was a thin wrapper around
+    queue_delayed_work() and hid the kernel API for no gain.
+  - the reschedule conditions moved into rtw_sdio_8723bs_reschedule_tx(),
+    so rtw_sdio_tx_handler() no longer explains any chip specific
+    condition in the common flow.
+  - dropped the unconditional break on a failed transfer. v4 and v5 had
+    it, and it quietly changed the other SDIO parts: upstream requeues
+    the frame and the loop retries, and breaking gave up after the first
+    failure. The two errors this chip needs to retry are handled in the
+    helper above, so the rest can keep the existing behaviour and the
+    other parts are untouched again.
+Changes in v5:
+  - the back-pressure and wake conditions moved into
+    rtw_sdio_8723bs_stop_tx_queue() and _wake_tx_queue().
+  - rtw_sdio_process_tx_queue() returns 0 on success and 1 for the empty
+    queue case, rather than the other way round.
+  - queue_stopped[] renamed to tx_queue_stopped[].
+  - fixed a transmit stall: the work item was only re-armed on a page
+    shortage, so on any other failure a stopped access category would
+    stay stopped for good. It now also re-arms on a failed skb
+    expansion, which with the page shortage covers both failures that
+    produce no log message.
+  - RTW_SDIO_TX_RETRY_DELAY is left as msecs_to_jiffies(1): it does not
+    become 0 for HZ < 1000, since msecs_to_jiffies() rounds up.
