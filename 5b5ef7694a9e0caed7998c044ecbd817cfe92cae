@@ -1,0 +1,9 @@
+New in v11.
+
+  Ping-Ke asked for this to come before the RTL8723BS accounting patch
+  rather than after the series, so that it backports on its own and so
+  that it is clear it is an existing problem rather than something the
+  RTL8723BS work introduced.
+
+  The pad_size local is the shape he asked for on v9: declared at the
+  top, computed unconditionally, and tested with if (pad_size > 0).
